@@ -11,9 +11,14 @@
 
 #include "stdafx.h"
 #include "D3D12HelloTexture.h"
+#include <filesystem>
+#include <string>
+#include <fstream>
+#include <stdint.h>
+#include <stdexcept>
 
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 618; }
-extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = u8".\\D3D12\\"; }
+extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
 
 D3D12HelloTexture::D3D12HelloTexture(UINT width, UINT height, std::wstring name) :
     DXSample(width, height, name),
@@ -213,7 +218,15 @@ void D3D12HelloTexture::LoadAssets()
         psoDesc.VS = CD3DX12_SHADER_BYTECODE(pVertexShaderData, vertexShaderDataLength);
         psoDesc.PS = CD3DX12_SHADER_BYTECODE(pPixelShaderData, pixelShaderDataLength);
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+#if 1
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
+        psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+        psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+#else
+        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+#endif
         psoDesc.DepthStencilState.DepthEnable = FALSE;
         psoDesc.DepthStencilState.StencilEnable = FALSE;
         psoDesc.SampleMask = UINT_MAX;
@@ -229,13 +242,26 @@ void D3D12HelloTexture::LoadAssets()
 
     // Create the vertex buffer.
     {
+#if 1
+        Vertex triangleVertices[] =
+        {
+            { {  0.25f,  0.25f * m_aspectRatio, 0.0f }, { 1.0f, 0.0f } },
+            { { -0.25f, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 1.0f } },
+            { { -0.25f,  0.25f * m_aspectRatio, 0.0f }, { 0.0f, 0.0f } },
+
+            { { -0.25f, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 1.0f } },
+            { {  0.25f,  0.25f * m_aspectRatio, 0.0f }, { 1.0f, 0.0f } },
+            { {  0.25f, -0.25f * m_aspectRatio, 0.0f }, { 1.0f, 1.0f } },
+        };
+#else
         // Define the geometry for a triangle.
         Vertex triangleVertices[] =
         {
-            { { 0.0f, 0.25f * m_aspectRatio, 0.0f }, { 0.5f, 0.0f } },
-            { { 0.25f, -0.25f * m_aspectRatio, 0.0f }, { 1.0f, 1.0f } },
+            { {  0.0f,   0.25f * m_aspectRatio, 0.0f }, { 0.5f, 0.0f } },
+            { {  0.25f, -0.25f * m_aspectRatio, 0.0f }, { 1.0f, 1.0f } },
             { { -0.25f, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 1.0f } }
         };
+#endif
 
         const UINT vertexBufferSize = sizeof(triangleVertices);
 
@@ -255,13 +281,15 @@ void D3D12HelloTexture::LoadAssets()
         UINT8* pVertexDataBegin;
         CD3DX12_RANGE readRange(0, 0);        // We do not intend to read from this resource on the CPU.
         ThrowIfFailed(m_vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
-        memcpy(pVertexDataBegin, triangleVertices, sizeof(triangleVertices));
+        memcpy(pVertexDataBegin, triangleVertices, vertexBufferSize);
         m_vertexBuffer->Unmap(0, nullptr);
 
         // Initialize the vertex buffer view.
         m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
         m_vertexBufferView.StrideInBytes = sizeof(Vertex);
         m_vertexBufferView.SizeInBytes = vertexBufferSize;
+
+        m_nVertices = vertexBufferSize / sizeof(Vertex);
     }
 
     // Note: ComPtr's are CPU objects but this resource needs to stay in scope until
@@ -351,6 +379,51 @@ void D3D12HelloTexture::LoadAssets()
 // Generate a simple black and white checkerboard texture.
 std::vector<UINT8> D3D12HelloTexture::GenerateTextureData()
 {
+#if 1
+    std::filesystem::path path = "soldier.bmp";
+    std::ifstream ifs(path, std::ios_base::binary);
+
+    BITMAPFILEHEADER bmpfh;
+    BITMAPINFOHEADER bmpih;
+    ifs.read((char*)&bmpfh, sizeof bmpfh);
+    ifs.read((char*)&bmpih, sizeof bmpih);
+
+    if (bmpfh.bfType != 0x4d42) {
+        throw std::runtime_error("file is not BMP");
+    }
+
+    if (bmpih.biWidth != TextureWidth || bmpih.biHeight != TextureHeight) {
+        throw std::runtime_error("BMP file size mismatch");
+    }
+    if (bmpih.biBitCount != 32) {
+        throw std::runtime_error("BMP bit format is not R8G8B8A8 32bit");
+    }
+
+    ifs.seekg(bmpfh.bfOffBits, std::ios_base::beg);
+
+
+    size_t imgSz = TextureWidth * TextureHeight * bmpih.biBitCount / 8;
+    std::vector<UINT8> data(imgSz);
+
+    // BMPは、下から上に画像が入っている。
+    // ピクセルの要素順はBGRA。
+    // DirectXのテクスチャーは上から下、RGBA順。
+    uint8_t bgra[4];
+    uint8_t rgba[4];
+    for (int y = 0; y < TextureHeight; ++y) {
+        for (int x = 0; x < TextureWidth; ++x) {
+            ifs.read(reinterpret_cast<char*>(&bgra[0]), 4);
+            rgba[0] = bgra[2];
+            rgba[1] = bgra[1];
+            rgba[2] = bgra[0];
+            rgba[3] = bgra[3];
+            memcpy(&data[((TextureHeight - y - 1) * TextureWidth + x) * 4], &rgba[0], 4);
+        }
+    }
+    ifs.close();
+
+    return data;
+#else
     const UINT rowPitch = TextureWidth * TexturePixelSize;
     const UINT cellPitch = rowPitch >> 3;        // The width of a cell in the checkboard texture.
     const UINT cellHeight = TextureWidth >> 3;    // The height of a cell in the checkerboard texture.
@@ -383,6 +456,7 @@ std::vector<UINT8> D3D12HelloTexture::GenerateTextureData()
     }
 
     return data;
+#endif
 }
 
 // Update frame-based values.
@@ -448,7 +522,7 @@ void D3D12HelloTexture::PopulateCommandList()
     m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
     m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
-    m_commandList->DrawInstanced(3, 1, 0, 0);
+    m_commandList->DrawInstanced(m_nVertices, 1, 0, 0);
 
     // Indicate that the back buffer will now be used to present.
     m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_renderTargets[m_frameIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
