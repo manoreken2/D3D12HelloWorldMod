@@ -243,15 +243,27 @@ void D3D12HelloTexture::LoadAssets()
     // Create the vertex buffer.
     {
 #if 1
+        float player_x = -0.3;
+        float enemy_x = +0.3;
         Vertex triangleVertices[] =
         {
-            { {  0.25f,  0.25f * m_aspectRatio, 0.0f }, { 1.0f, 0.0f } },
-            { { -0.25f, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 1.0f } },
-            { { -0.25f,  0.25f * m_aspectRatio, 0.0f }, { 0.0f, 0.0f } },
+            // player
+            { {  0.25f + player_x,  0.25f * m_aspectRatio, 0.0f }, { 0.5f, 0.0f } },
+            { { -0.25f + player_x, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 0.5f } },
+            { { -0.25f + player_x,  0.25f * m_aspectRatio, 0.0f }, { 0.0f, 0.0f } },
 
-            { { -0.25f, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 1.0f } },
-            { {  0.25f,  0.25f * m_aspectRatio, 0.0f }, { 1.0f, 0.0f } },
-            { {  0.25f, -0.25f * m_aspectRatio, 0.0f }, { 1.0f, 1.0f } },
+            { { -0.25f + player_x, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 0.5f } },
+            { {  0.25f + player_x,  0.25f * m_aspectRatio, 0.0f }, { 0.5f, 0.0f } },
+            { {  0.25f + player_x, -0.25f * m_aspectRatio, 0.0f }, { 0.5f, 0.5f } },
+
+            // enemy
+            { {  0.25f + enemy_x,  0.25f * m_aspectRatio, 0.0f }, { 1.0f, 0.0f } },
+            { { -0.25f + enemy_x, -0.25f * m_aspectRatio, 0.0f }, { 0.5f, 0.5f } },
+            { { -0.25f + enemy_x,  0.25f * m_aspectRatio, 0.0f }, { 0.5f, 0.0f } },
+
+            { { -0.25f + enemy_x, -0.25f * m_aspectRatio, 0.0f }, { 0.5f, 0.5f } },
+            { {  0.25f + enemy_x,  0.25f * m_aspectRatio, 0.0f }, { 1.0f, 0.0f } },
+            { {  0.25f + enemy_x, -0.25f * m_aspectRatio, 0.0f }, { 1.0f, 0.5f } },
         };
 #else
         // Define the geometry for a triangle.
@@ -300,6 +312,11 @@ void D3D12HelloTexture::LoadAssets()
 
     // Create the texture.
     {
+        // ファイルから画像を読んで、テクスチャー画像のサイズTextureWidth, TextureHeightが決まります。
+        // Copy data to the intermediate upload heap and then schedule a copy 
+        // from the upload heap to the Texture2D.
+        std::vector<UINT8> texture = GenerateTextureData();
+
         // Describe and create a Texture2D.
         D3D12_RESOURCE_DESC textureDesc = {};
         textureDesc.MipLevels = 1;
@@ -330,10 +347,6 @@ void D3D12HelloTexture::LoadAssets()
             D3D12_RESOURCE_STATE_GENERIC_READ,
             nullptr,
             IID_PPV_ARGS(&textureUploadHeap)));
-
-        // Copy data to the intermediate upload heap and then schedule a copy 
-        // from the upload heap to the Texture2D.
-        std::vector<UINT8> texture = GenerateTextureData();
 
         D3D12_SUBRESOURCE_DATA textureData = {};
         textureData.pData = &texture[0];
@@ -380,7 +393,7 @@ void D3D12HelloTexture::LoadAssets()
 std::vector<UINT8> D3D12HelloTexture::GenerateTextureData()
 {
 #if 1
-    std::filesystem::path path = "soldier.bmp";
+    std::filesystem::path path = "atlas.bmp";
     std::ifstream ifs(path, std::ios_base::binary);
 
     BITMAPFILEHEADER bmpfh;
@@ -392,8 +405,11 @@ std::vector<UINT8> D3D12HelloTexture::GenerateTextureData()
         throw std::runtime_error("file is not BMP");
     }
 
-    if (bmpih.biWidth != TextureWidth || bmpih.biHeight != TextureHeight) {
-        throw std::runtime_error("BMP file size mismatch");
+    TextureWidth = bmpih.biWidth;
+    TextureHeight = bmpih.biHeight;
+
+    if (bmpih.biHeight < TextureHeight) {
+        throw std::runtime_error("BMP unsupported file type.");
     }
     if (bmpih.biBitCount != 32) {
         throw std::runtime_error("BMP bit format is not R8G8B8A8 32bit");
@@ -518,7 +534,7 @@ void D3D12HelloTexture::PopulateCommandList()
     m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
     // Record commands.
-    const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
+    const float clearColor[] = { 0.0f, 0.4f, 0.2f, 1.0f };
     m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
     m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
