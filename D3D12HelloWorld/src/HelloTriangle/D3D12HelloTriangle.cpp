@@ -303,8 +303,19 @@ void D3D12HelloTriangle::PopulateCommandList()
     m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
     // Record commands.
-    const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
-    m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+    constexpr int COLOR_NUM = 3;
+    static int s_color_idx = -1;
+
+    ++s_color_idx;
+    if (COLOR_NUM <= s_color_idx) {
+        s_color_idx = 0;
+    }
+    const float clearColors[COLOR_NUM][4] = {
+        { 0.0f, 0.2f, 0.2f, 1.0f },
+        { 0.2f, 0.0f, 0.2f, 1.0f },
+        { 0.2f, 0.2f, 0.0f, 1.0f }
+    };
+    m_commandList->ClearRenderTargetView(rtvHandle, clearColors[s_color_idx], 0, nullptr);
     m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
     m_commandList->DrawInstanced(3, 1, 0, 0);
