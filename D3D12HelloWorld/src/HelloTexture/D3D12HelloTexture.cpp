@@ -144,7 +144,7 @@ void D3D12HelloTexture::LoadPipeline()
                 ThrowIfFailed(m_device->CreateCommandAllocator(
                     D3D12_COMMAND_LIST_TYPE_DIRECT,
                     IID_PPV_ARGS(&m_commandAllocators[n])));
-                NAME_D3D12_OBJECT(m_commandAllocators[0]);
+                NAME_D3D12_OBJECT_INDEXED(m_commandAllocators, n);
 
                 // Create the constant buffer.
                 {
