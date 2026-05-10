@@ -11,9 +11,11 @@
 
 #include "stdafx.h"
 #include "D3D12HelloFrameBuffering.h"
+#include <format>
+#include <string>
 
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 618; }
-extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = u8".\\D3D12\\"; }
+extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
 
 D3D12HelloFrameBuffering::D3D12HelloFrameBuffering(UINT width, UINT height, std::wstring name) :
     DXSample(width, height, name),
@@ -109,6 +111,7 @@ void D3D12HelloFrameBuffering::LoadPipeline()
 
     ThrowIfFailed(swapChain.As(&m_swapChain));
     m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
+    OutputDebugStringA(std::format("  m_frameIndex=backBufferIdx={}\n", m_frameIndex).c_str());;
 
     // Create descriptor heaps.
     {
@@ -133,7 +136,9 @@ void D3D12HelloFrameBuffering::LoadPipeline()
             m_device->CreateRenderTargetView(m_renderTargets[n].Get(), nullptr, rtvHandle);
             rtvHandle.Offset(1, m_rtvDescriptorSize);
 
-            ThrowIfFailed(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocators[n])));
+            ThrowIfFailed(m_device->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                IID_PPV_ARGS(&m_commandAllocators[n])));
         }
     }
 }
@@ -188,7 +193,9 @@ void D3D12HelloFrameBuffering::LoadAssets()
     }
 
     // Create the command list.
-    ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocators[m_frameIndex].Get(), m_pipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
+    ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+        m_commandAllocators[m_frameIndex].Get(),
+        m_pipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
 
     // Command lists are created in the recording state, but there is nothing
     // to record yet. The main loop expects it to be closed, so close it now.
@@ -235,6 +242,9 @@ void D3D12HelloFrameBuffering::LoadAssets()
     {
         ThrowIfFailed(m_device->CreateFence(m_fenceValues[m_frameIndex], D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
         m_fenceValues[m_frameIndex]++;
+
+        OutputDebugStringA(std::format(" LoadAssets m_frameIndex={} m_fenceValues[0]={} [1]={}\n",
+            m_frameIndex, m_fenceValues[0], m_fenceValues[1]).c_str());
 
         // Create an event handle to use for frame synchronization.
         m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
@@ -304,8 +314,19 @@ void D3D12HelloFrameBuffering::PopulateCommandList()
     m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
     // Record commands.
-    const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f };
-    m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+    constexpr int COLOR_NUM = 3;
+    static int s_color_idx = -1;
+
+    ++s_color_idx;
+    if (COLOR_NUM <= s_color_idx) {
+        s_color_idx = 0;
+    }
+    const float clearColors[COLOR_NUM][4] = {
+        { 0.0f, 0.2f, 0.2f, 1.0f },
+        { 0.2f, 0.0f, 0.2f, 1.0f },
+        { 0.2f, 0.2f, 0.0f, 1.0f }
+    };
+    m_commandList->ClearRenderTargetView(rtvHandle, clearColors[s_color_idx], 0, nullptr);
     m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
     m_commandList->DrawInstanced(3, 1, 0, 0);
@@ -328,25 +349,75 @@ void D3D12HelloFrameBuffering::WaitForGpu()
 
     // Increment the fence value for the current frame.
     m_fenceValues[m_frameIndex]++;
+
+    OutputDebugStringA(std::format(" WaitGpu m_frameIndex={} m_fenceValues[]={} {} backBufIdx={}\n",
+        m_frameIndex, m_fenceValues[0], m_fenceValues[1],
+        m_swapChain->GetCurrentBackBufferIndex()).c_str());
 }
 
 // Prepare to render the next frame.
 void D3D12HelloFrameBuffering::MoveToNextFrame()
 {
-    // Schedule a Signal command in the queue.
+    // コマンドキューに描画コマンドを積み、Presentも積んで、fence値の更新も積む。
     const UINT64 currentFenceValue = m_fenceValues[m_frameIndex];
     ThrowIfFailed(m_commandQueue->Signal(m_fence.Get(), currentFenceValue));
 
-    // Update the frame index.
-    m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
-
-    // If the next frame is not ready to be rendered yet, wait until it is ready.
-    if (m_fence->GetCompletedValue() < m_fenceValues[m_frameIndex])
     {
+        // バッファーが1回フリップしている。
+        // なのでバッファー番号が必ず1進む。
+        UINT64 backBuffierIdx = m_swapChain->GetCurrentBackBufferIndex();
+
+        std::string s = std::format(" {} frameIdx={} backBufIdx={}\n",
+            currentFenceValue, m_frameIndex, backBuffierIdx);
+        OutputDebugStringA(s.c_str());
+
+        m_frameIndex = UINT(backBuffierIdx);
+    }
+
+    UINT64 completed_fence_value = m_fence->GetCompletedValue();
+    if (completed_fence_value < m_fenceValues[m_frameIndex])
+    {
+        std::string s = std::format(" Fence wait. cur={} completed={} wait={}\n",
+            currentFenceValue, completed_fence_value, m_fenceValues[m_frameIndex]);
+        OutputDebugStringA(s.c_str());
         ThrowIfFailed(m_fence->SetEventOnCompletion(m_fenceValues[m_frameIndex], m_fenceEvent));
         WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
     }
 
+    {
+        UINT64 backBuffierIdx = m_swapChain->GetCurrentBackBufferIndex();
+
+        std::string s = std::format("   {} frameIdx={} backBufIdx={}\n",
+            currentFenceValue, m_frameIndex, backBuffierIdx);
+        OutputDebugStringA(s.c_str());
+    }
+
+    /*
+         2 frameIdx=0 backBufIdx=1
+           2 frameIdx=1 backBufIdx=1
+         3 frameIdx=1 backBufIdx=0
+           3 frameIdx=0 backBufIdx=0
+         4 frameIdx=0 backBufIdx=1
+           4 frameIdx=1 backBufIdx=1
+         5 frameIdx=1 backBufIdx=0
+         Fence wait. cur=5 completed=3 wait=4
+           5 frameIdx=0 backBufIdx=0
+         6 frameIdx=0 backBufIdx=1
+         Fence wait. cur=6 completed=4 wait=5
+           6 frameIdx=1 backBufIdx=1
+         7 frameIdx=1 backBufIdx=0
+         Fence wait. cur=7 completed=5 wait=6
+           7 frameIdx=0 backBufIdx=0
+         8 frameIdx=0 backBufIdx=1
+         Fence wait. cur=8 completed=6 wait=7
+           8 frameIdx=1 backBufIdx=1
+    */
+
     // Set the fence value for the next frame.
     m_fenceValues[m_frameIndex] = currentFenceValue + 1;
+
+
+    OutputDebugStringA(std::format(" MoveToNextFrame m_frameIndex={} m_fenceValues[]={} {}\n",
+        m_frameIndex, m_fenceValues[0], m_fenceValues[1]).c_str());
+
 }
