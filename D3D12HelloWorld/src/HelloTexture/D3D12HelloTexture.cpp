@@ -26,7 +26,6 @@ D3D12HelloTexture::D3D12HelloTexture(UINT width, UINT height, std::wstring name)
     m_viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)),
     m_scissorRect(0, 0, static_cast<LONG>(width), static_cast<LONG>(height)),
     m_rtvDescriptorSize(0),
-    m_pCbvDataBegin(nullptr),
     m_constantBufferData{}
 {
 }
@@ -133,19 +132,43 @@ void D3D12HelloTexture::LoadPipeline()
         {
             CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeap->GetCPUDescriptorHandleForHeapStart());
 
-            // Create a RTV for each frame.
             for (UINT n = 0; n < FrameCount; n++)
             {
+                // Create a RTV for each frame.
                 ThrowIfFailed(m_swapChain->GetBuffer(n, IID_PPV_ARGS(&m_renderTargets[n])));
                 m_device->CreateRenderTargetView(m_renderTargets[n].Get(), nullptr, rtvHandle);
                 rtvHandle.Offset(1, m_rtvDescriptorSize);
                 NAME_D3D12_OBJECT_INDEXED(m_renderTargets, n);
+
+                // コマンドアロケーター。
+                ThrowIfFailed(m_device->CreateCommandAllocator(
+                    D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    IID_PPV_ARGS(&m_commandAllocators[n])));
+                NAME_D3D12_OBJECT(m_commandAllocators[0]);
+
+                // Create the constant buffer.
+                {
+                    const UINT constantBufferSize = sizeof(SceneConstantBuffer);    // CB size is required to be 256-byte aligned.
+
+                    ThrowIfFailed(m_device->CreateCommittedResource(
+                        &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+                        D3D12_HEAP_FLAG_NONE,
+                        &CD3DX12_RESOURCE_DESC::Buffer(constantBufferSize),
+                        D3D12_RESOURCE_STATE_GENERIC_READ,
+                        nullptr,
+                        IID_PPV_ARGS(&m_constantBuffers[n])));
+
+                    // Map and initialize the constant buffer. We don't unmap this until the
+                    // app closes. Keeping things mapped for the lifetime of the resource is okay.
+                    CD3DX12_RANGE readRange(0, 0);        // We do not intend to read from this resource on the CPU.
+                    UINT8* pVertexDataBegin = nullptr;
+                    ThrowIfFailed(m_constantBuffers[n]->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin)));
+                    memcpy(pVertexDataBegin, &m_constantBufferData, sizeof(m_constantBufferData));
+                    m_pCbvDataBegins[n] = pVertexDataBegin;
+                }
             }
         }
     }
-
-    ThrowIfFailed(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocator)));
-    NAME_D3D12_OBJECT(m_commandAllocator);
 }
 
 // Load the sample assets.
@@ -248,12 +271,12 @@ void D3D12HelloTexture::LoadAssets()
 
     // Create the command list.
     ThrowIfFailed(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-        m_commandAllocator.Get(), m_pipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
+        m_commandAllocators[m_frameIndex].Get(),
+        m_pipelineState.Get(), IID_PPV_ARGS(&m_commandList)));
     NAME_D3D12_OBJECT(m_commandList);
 
     // Create the vertex buffer.
     {
-#if 1
         float player_x = -0.3f;
         float enemy_x = +0.3f;
         Vertex triangleVertices[] =
@@ -276,15 +299,6 @@ void D3D12HelloTexture::LoadAssets()
             { {  0.25f + enemy_x,  0.25f * m_aspectRatio, 0.0f }, { 1.0f, 0.0f } },
             { {  0.25f + enemy_x, -0.25f * m_aspectRatio, 0.0f }, { 1.0f, 0.5f } },
         };
-#else
-        // Define the geometry for a triangle.
-        Vertex triangleVertices[] =
-        {
-            { {  0.0f,   0.25f * m_aspectRatio, 0.0f }, { 0.5f, 0.0f } },
-            { {  0.25f, -0.25f * m_aspectRatio, 0.0f }, { 1.0f, 1.0f } },
-            { { -0.25f, -0.25f * m_aspectRatio, 0.0f }, { 0.0f, 1.0f } }
-        };
-#endif
 
         const UINT vertexBufferSize = sizeof(triangleVertices);
 
@@ -314,25 +328,6 @@ void D3D12HelloTexture::LoadAssets()
         m_vertexBufferView.SizeInBytes = vertexBufferSize;
 
         m_nVertices = vertexBufferSize / sizeof(Vertex);
-    }
-
-    // Create the constant buffer.
-    {
-        const UINT constantBufferSize = sizeof(SceneConstantBuffer);    // CB size is required to be 256-byte aligned.
-
-        ThrowIfFailed(m_device->CreateCommittedResource(
-            &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
-            D3D12_HEAP_FLAG_NONE,
-            &CD3DX12_RESOURCE_DESC::Buffer(constantBufferSize),
-            D3D12_RESOURCE_STATE_GENERIC_READ,
-            nullptr,
-            IID_PPV_ARGS(&m_constantBuffer)));
-
-        // Map and initialize the constant buffer. We don't unmap this until the
-        // app closes. Keeping things mapped for the lifetime of the resource is okay.
-        CD3DX12_RANGE readRange(0, 0);        // We do not intend to read from this resource on the CPU.
-        ThrowIfFailed(m_constantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pCbvDataBegin)));
-        memcpy(m_pCbvDataBegin, &m_constantBufferData, sizeof(m_constantBufferData));
     }
 
     // Note: ComPtr's are CPU objects but this resource needs to stay in scope until
@@ -389,25 +384,25 @@ void D3D12HelloTexture::LoadAssets()
         m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_texture.Get(),
             D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
 
-        {
-            /* SRV + CBVヒープ。シェーダーからは b0 および t0 でアクセスする。
-                0: srv texture, t0,
-                1: cbv constant, b0
-            */
+        /* SRV + CBVヒープ。シェーダーからは b0 および t0 でアクセスする。
+            0: srv texture, t0,
+            1: cbv constant, b0
+        */
+        m_srvcbvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        for (int n=0; n<FrameCount; ++n) {
 
             // Describe and create a shader resource view (SRV CBV) heap for the texture.
             D3D12_DESCRIPTOR_HEAP_DESC srv_cbv_HeapDesc = {};
             srv_cbv_HeapDesc.NumDescriptors = 2; // srv1個、cbv1個。計2個。
             srv_cbv_HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
             srv_cbv_HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-            ThrowIfFailed(m_device->CreateDescriptorHeap(&srv_cbv_HeapDesc, IID_PPV_ARGS(&m_srvcbvHeap)));
-            NAME_D3D12_OBJECT(m_srvcbvHeap);
-
-            m_srvcbvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            ThrowIfFailed(m_device->CreateDescriptorHeap(&srv_cbv_HeapDesc, IID_PPV_ARGS(&m_srvcbvHeaps[n])));
+            NAME_D3D12_OBJECT(m_srvcbvHeaps[n]);
 
             {
                 // 1個目はSRV texture t0。
-                CD3DX12_CPU_DESCRIPTOR_HANDLE srv_cbv_handle(m_srvcbvHeap->GetCPUDescriptorHandleForHeapStart());
+                CD3DX12_CPU_DESCRIPTOR_HANDLE srv_cbv_handle(m_srvcbvHeaps[n]->GetCPUDescriptorHandleForHeapStart());
                 D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
                 srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 srvDesc.Format = textureDesc.Format;
@@ -415,12 +410,12 @@ void D3D12HelloTexture::LoadAssets()
                 srvDesc.Texture2D.MipLevels = 1;
                 m_device->CreateShaderResourceView(m_texture.Get(), &srvDesc, srv_cbv_handle);
 
-                // 2個目は、CBV 定数 b0。
+                // 2個目は、CBV 定数 b0。コンスタントバッファーn番を指す。
                 srv_cbv_handle.Offset(1, m_srvcbvDescriptorSize);
 
                 const UINT constantBufferSize = sizeof(SceneConstantBuffer);
                 D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-                cbvDesc.BufferLocation = m_constantBuffer->GetGPUVirtualAddress();
+                cbvDesc.BufferLocation = m_constantBuffers[n]->GetGPUVirtualAddress();
                 cbvDesc.SizeInBytes = constantBufferSize;
                 m_device->CreateConstantBufferView(&cbvDesc, srv_cbv_handle);
             }
@@ -435,7 +430,7 @@ void D3D12HelloTexture::LoadAssets()
     // Create synchronization objects and wait until assets have been uploaded to the GPU.
     {
         ThrowIfFailed(m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
-        m_fenceValue = 1;
+        m_fenceValues[m_frameIndex] = 1;
 
         // Create an event handle to use for frame synchronization.
         m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
@@ -447,14 +442,13 @@ void D3D12HelloTexture::LoadAssets()
         // Wait for the command list to execute; we are reusing the same command 
         // list in our main loop but for now, we just want to wait for setup to 
         // complete before continuing.
-        WaitForPreviousFrame();
+        WaitForGpu();
     }
 }
 
 // Generate a simple black and white checkerboard texture.
 std::vector<UINT8> D3D12HelloTexture::GenerateTextureData()
 {
-#if 1
     std::filesystem::path path = "atlas.bmp";
     std::ifstream ifs(path, std::ios_base::binary);
 
@@ -501,40 +495,6 @@ std::vector<UINT8> D3D12HelloTexture::GenerateTextureData()
     ifs.close();
 
     return data;
-#else
-    const UINT rowPitch = TextureWidth * TexturePixelSize;
-    const UINT cellPitch = rowPitch >> 3;        // The width of a cell in the checkboard texture.
-    const UINT cellHeight = TextureWidth >> 3;    // The height of a cell in the checkerboard texture.
-    const UINT textureSize = rowPitch * TextureHeight;
-
-    std::vector<UINT8> data(textureSize);
-    UINT8* pData = &data[0];
-
-    for (UINT n = 0; n < textureSize; n += TexturePixelSize)
-    {
-        UINT x = n % rowPitch;
-        UINT y = n / rowPitch;
-        UINT i = x / cellPitch;
-        UINT j = y / cellHeight;
-
-        if (i % 2 == j % 2)
-        {
-            pData[n] = 0x00;        // R
-            pData[n + 1] = 0x00;    // G
-            pData[n + 2] = 0x00;    // B
-            pData[n + 3] = 0xff;    // A
-        }
-        else
-        {
-            pData[n] = 0xff;        // R
-            pData[n + 1] = 0xff;    // G
-            pData[n + 2] = 0xff;    // B
-            pData[n + 3] = 0xff;    // A
-        }
-    }
-
-    return data;
-#endif
 }
 
 // Update frame-based values.
@@ -548,7 +508,12 @@ void D3D12HelloTexture::OnUpdate()
     {
         m_constantBufferData.offset.x = -offsetBounds;
     }
-    memcpy(m_pCbvDataBegin, &m_constantBufferData, sizeof(m_constantBufferData));
+    memcpy(m_pCbvDataBegins[m_frameIndex], &m_constantBufferData, sizeof(m_constantBufferData));
+
+    OutputDebugStringA(
+        std::format(" OnUpdate framIdx={} offsX={}\n",
+        m_frameIndex, m_constantBufferData.offset.x)
+        .c_str());
 }
 
 // Render the scene.
@@ -564,14 +529,14 @@ void D3D12HelloTexture::OnRender()
     // Present the frame.
     ThrowIfFailed(m_swapChain->Present(1, 0));
 
-    WaitForPreviousFrame();
+    MoveToNextFrame();
 }
 
 void D3D12HelloTexture::OnDestroy()
 {
     // Ensure that the GPU is no longer referencing resources that are about to be
     // cleaned up by the destructor.
-    WaitForPreviousFrame();
+    WaitForGpu();
 
     CloseHandle(m_fenceEvent);
 }
@@ -581,22 +546,22 @@ void D3D12HelloTexture::PopulateCommandList()
     // Command list allocators can only be reset when the associated 
     // command lists have finished execution on the GPU; apps should use 
     // fences to determine GPU execution progress.
-    ThrowIfFailed(m_commandAllocator->Reset());
+    ThrowIfFailed(m_commandAllocators[m_frameIndex]->Reset());
 
     // However, when ExecuteCommandList() is called on a particular command 
     // list, that command list can then be reset at any time and must be before 
     // re-recording.
-    ThrowIfFailed(m_commandList->Reset(m_commandAllocator.Get(), m_pipelineState.Get()));
+    ThrowIfFailed(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), m_pipelineState.Get()));
 
     // Set necessary state.
     m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
 
-    ID3D12DescriptorHeap* ppHeaps[] = { m_srvcbvHeap.Get() };
+    ID3D12DescriptorHeap* ppHeaps[] = { m_srvcbvHeaps[m_frameIndex].Get()};
     m_commandList->SetDescriptorHeaps(1, ppHeaps);
 
     {
         // テクスチャーt0
-        CD3DX12_GPU_DESCRIPTOR_HANDLE dh(m_srvcbvHeap->GetGPUDescriptorHandleForHeapStart());
+        CD3DX12_GPU_DESCRIPTOR_HANDLE dh(m_srvcbvHeaps[m_frameIndex]->GetGPUDescriptorHandleForHeapStart());
         m_commandList->SetGraphicsRootDescriptorTable(0, dh);
 
         // 定数バッファc0
@@ -629,7 +594,7 @@ void D3D12HelloTexture::PopulateCommandList()
     ThrowIfFailed(m_commandList->Close());
 }
 
-void D3D12HelloTexture::WaitForPreviousFrame()
+void D3D12HelloTexture::WaitForGpu()
 {
     // WAITING FOR THE FRAME TO COMPLETE BEFORE CONTINUING IS NOT BEST PRACTICE.
     // This is code implemented as such for simplicity. The D3D12HelloFrameBuffering
@@ -637,9 +602,8 @@ void D3D12HelloTexture::WaitForPreviousFrame()
     // maximize GPU utilization.
 
     // Signal and increment the fence value.
-    const UINT64 fence = m_fenceValue;
+    const UINT64 fence = m_fenceValues[m_frameIndex];
     ThrowIfFailed(m_commandQueue->Signal(m_fence.Get(), fence));
-    m_fenceValue++;
 
     // Wait until the previous frame is finished.
     if (m_fence->GetCompletedValue() < fence)
@@ -648,5 +612,31 @@ void D3D12HelloTexture::WaitForPreviousFrame()
         WaitForSingleObject(m_fenceEvent, INFINITE);
     }
 
-    m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
+    // Increment the fence value for the current frame.
+    m_fenceValues[m_frameIndex]++;
+}
+
+void D3D12HelloTexture::MoveToNextFrame()
+{
+    // コマンドキューに描画コマンドを積み、Presentも積んで、fence値の更新も積む。
+    const UINT64 currentFenceValue = m_fenceValues[m_frameIndex];
+    ThrowIfFailed(m_commandQueue->Signal(m_fence.Get(), currentFenceValue));
+
+    {
+        // バッファーが1回フリップしている。
+        // なのでバッファー番号が必ず1進む。
+        UINT64 backBuffierIdx = m_swapChain->GetCurrentBackBufferIndex();
+
+        m_frameIndex = UINT(backBuffierIdx);
+    }
+
+    UINT64 completed_fence_value = m_fence->GetCompletedValue();
+    if (completed_fence_value < m_fenceValues[m_frameIndex])
+    {
+        ThrowIfFailed(m_fence->SetEventOnCompletion(m_fenceValues[m_frameIndex], m_fenceEvent));
+        WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
+    }
+
+    // Set the fence value for the next frame.
+    m_fenceValues[m_frameIndex] = currentFenceValue + 1;
 }
